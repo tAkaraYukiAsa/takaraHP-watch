@@ -1,4 +1,4 @@
-name: Watch Takarazuka Page
+name: Watch Takarazuka Pages
 
 on:
   workflow_dispatch:
@@ -9,65 +9,122 @@ permissions:
   contents: write
 
 jobs:
-  check-page:
+  check-pages:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download current page
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium
+
+      - name: Download NTA page
         run: |
           curl -L \
             --silent \
             --show-error \
             --user-agent "Mozilla/5.0" \
             "https://www.nta.co.jp/jrodekakenet/plan/takarazukakageki/" \
-            -o current.html
+            -o nta_current.html
 
-      - name: Create current hash
+      - name: Download Yomiuri page
         run: |
-          shasum -a 256 current.html | awk '{print $1}' > current_hash.txt
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
 
-      - name: Compare with previous hash
-        id: compare
+          url = "https://www.yomiuri-ryokou.co.jp/r/tour-search/type-kokunai/detail_type-tour/dep_larg-kanto_koshin/dep_mid-tokyo/dst_larg-kanto_koshin/dst_mid-tokyo/freeword-%E5%AE%9D%E5%A1%9A/"
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              page = browser.new_page()
+              page.goto(url, wait_until="networkidle", timeout=120000)
+              html = page.content()
+              with open("yomiuri_current.html", "w", encoding="utf-8") as f:
+                  f.write(html)
+              browser.close()
+          PY
+
+      - name: Create hashes
         run: |
-          CURRENT=$(cat current_hash.txt)
+          shasum -a 256 nta_current.html | awk '{print $1}' > nta_current_hash.txt
+          shasum -a 256 yomiuri_current.html | awk '{print $1}' > yomiuri_current_hash.txt
 
-          if [ ! -f last_hash.txt ]; then
-            echo "$CURRENT" > last_hash.txt
+      - name: Compare NTA page
+        id: nta
+        run: |
+          CURRENT=$(cat nta_current_hash.txt)
+
+          if [ ! -f last_hash_nta.txt ]; then
+            echo "$CURRENT" > last_hash_nta.txt
             echo "changed=false" >> $GITHUB_OUTPUT
           else
-            PREVIOUS=$(cat last_hash.txt)
+            PREVIOUS=$(cat last_hash_nta.txt)
 
             if [ "$CURRENT" != "$PREVIOUS" ]; then
-              echo "$CURRENT" > last_hash.txt
+              echo "$CURRENT" > last_hash_nta.txt
               echo "changed=true" >> $GITHUB_OUTPUT
             else
               echo "changed=false" >> $GITHUB_OUTPUT
             fi
           fi
 
-      - name: Send notification
-        if: steps.compare.outputs.changed == 'true'
+      - name: Compare Yomiuri page
+        id: yomiuri
+        run: |
+          CURRENT=$(cat yomiuri_current_hash.txt)
+
+          if [ ! -f last_hash_yomiuri.txt ]; then
+            echo "$CURRENT" > last_hash_yomiuri.txt
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            PREVIOUS=$(cat last_hash_yomiuri.txt)
+
+            if [ "$CURRENT" != "$PREVIOUS" ]; then
+              echo "$CURRENT" > last_hash_yomiuri.txt
+              echo "changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "changed=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Notify NTA update
+        if: steps.nta.outputs.changed == 'true'
         env:
           TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
           curl \
-            -H "Title: 宝塚ページ更新" \
+            -H "Title: 日本旅行 宝塚ページ更新" \
             -H "Priority: high" \
             -d "https://www.nta.co.jp/jrodekakenet/plan/takarazukakageki/ に変更がありました。" \
-            https://ntfy.sh/$TOPIC
+            "https://ntfy.sh/$TOPIC"
 
-      - name: Save new hash
+      - name: Notify Yomiuri update
+        if: steps.yomiuri.outputs.changed == 'true'
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          curl \
+            -H "Title: 読売旅行 宝塚ページ更新" \
+            -H "Priority: high" \
+            -d "読売旅行の宝塚検索ページに変更がありました。" \
+            "https://ntfy.sh/$TOPIC"
+
+      - name: Save new hashes
         run: |
           git config --global user.name github-actions
           git config --global user.email github-actions@github.com
 
-          git add last_hash.txt
+          git add last_hash_nta.txt last_hash_yomiuri.txt
 
           git diff --cached --quiet && exit 0
 
-          git commit -m "Update page hash"
-
+          git commit -m "Update monitored page hashes"
           git push
