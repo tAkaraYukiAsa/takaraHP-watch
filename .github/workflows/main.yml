@@ -21,21 +21,42 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Playwright
+      - name: Install packages
         run: |
-          pip install playwright
+          pip install requests beautifulsoup4 playwright
           playwright install chromium
 
-      - name: Download NTA page
+      - name: Get visible text from NTA
         run: |
-          curl -L \
-            --silent \
-            --show-error \
-            --user-agent "Mozilla/5.0" \
-            "https://www.nta.co.jp/jrodekakenet/plan/takarazukakageki/" \
-            -o nta_current.html
+          python - <<'PY'
+          import requests
+          from bs4 import BeautifulSoup
 
-      - name: Download Yomiuri page
+          url = "https://www.nta.co.jp/jrodekakenet/plan/takarazukakageki/"
+
+          r = requests.get(
+              url,
+              headers={"User-Agent": "Mozilla/5.0"},
+              timeout=60
+          )
+          r.raise_for_status()
+
+          soup = BeautifulSoup(r.text, "html.parser")
+
+          for tag in soup(["script", "style", "noscript"]):
+              tag.decompose()
+
+          text = "\n".join(
+              line.strip()
+              for line in soup.get_text("\n").splitlines()
+              if line.strip()
+          )
+
+          with open("nta_current.txt", "w", encoding="utf-8") as f:
+              f.write(text)
+          PY
+
+      - name: Get visible text from Yomiuri
         run: |
           python - <<'PY'
           from playwright.sync_api import sync_playwright
@@ -44,18 +65,39 @@ jobs:
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
-              page = browser.new_page()
-              page.goto(url, wait_until="networkidle", timeout=120000)
-              html = page.content()
-              with open("yomiuri_current.html", "w", encoding="utf-8") as f:
-                  f.write(html)
+
+              page = browser.new_page(
+                  user_agent="Mozilla/5.0"
+              )
+
+              page.goto(
+                  url,
+                  wait_until="networkidle",
+                  timeout=120000
+              )
+
+              text = page.locator("body").inner_text()
+
+              text = "\n".join(
+                  line.strip()
+                  for line in text.splitlines()
+                  if line.strip()
+              )
+
+              with open(
+                  "yomiuri_current.txt",
+                  "w",
+                  encoding="utf-8"
+              ) as f:
+                  f.write(text)
+
               browser.close()
           PY
 
       - name: Create hashes
         run: |
-          shasum -a 256 nta_current.html | awk '{print $1}' > nta_current_hash.txt
-          shasum -a 256 yomiuri_current.html | awk '{print $1}' > yomiuri_current_hash.txt
+          shasum -a 256 nta_current.txt | awk '{print $1}' > nta_current_hash.txt
+          shasum -a 256 yomiuri_current.txt | awk '{print $1}' > yomiuri_current_hash.txt
 
       - name: Compare NTA page
         id: nta
@@ -103,7 +145,8 @@ jobs:
           curl \
             -H "Title: 日本旅行 宝塚ページ更新" \
             -H "Priority: high" \
-            -d "https://www.nta.co.jp/jrodekakenet/plan/takarazukakageki/ に変更がありました。" \
+            -H "Click: https://www.nta.co.jp/jrodekakenet/plan/takarazukakageki/" \
+            -d "日本旅行の宝塚ページの表示内容が変わりました。" \
             "https://ntfy.sh/$TOPIC"
 
       - name: Notify Yomiuri update
@@ -114,7 +157,8 @@ jobs:
           curl \
             -H "Title: 読売旅行 宝塚ページ更新" \
             -H "Priority: high" \
-            -d "読売旅行の宝塚検索ページに変更がありました。" \
+            -H "Click: https://www.yomiuri-ryokou.co.jp/r/tour-search/type-kokunai/detail_type-tour/dep_larg-kanto_koshin/dep_mid-tokyo/dst_larg-kanto_koshin/dst_mid-tokyo/freeword-%E5%AE%9D%E5%A1%9A/" \
+            -d "読売旅行の宝塚検索ページの表示内容が変わりました。" \
             "https://ntfy.sh/$TOPIC"
 
       - name: Save new hashes
