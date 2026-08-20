@@ -1,0 +1,73 @@
+name: Watch Takarazuka Page
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  check-page:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download current page
+        run: |
+          curl -L \
+            --silent \
+            --show-error \
+            --user-agent "Mozilla/5.0" \
+            "https://www.nta.co.jp/jrodekakenet/plan/takarazukakageki/" \
+            -o current.html
+
+      - name: Create current hash
+        run: |
+          shasum -a 256 current.html | awk '{print $1}' > current_hash.txt
+
+      - name: Compare with previous hash
+        id: compare
+        run: |
+          CURRENT=$(cat current_hash.txt)
+
+          if [ ! -f last_hash.txt ]; then
+            echo "$CURRENT" > last_hash.txt
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            PREVIOUS=$(cat last_hash.txt)
+
+            if [ "$CURRENT" != "$PREVIOUS" ]; then
+              echo "$CURRENT" > last_hash.txt
+              echo "changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "changed=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Send notification
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          curl \
+            -H "Title: 宝塚ページ更新" \
+            -H "Priority: high" \
+            -d "https://www.nta.co.jp/jrodekakenet/plan/takarazukakageki/ に変更がありました。" \
+            https://ntfy.sh/$TOPIC
+
+      - name: Save new hash
+        run: |
+          git config --global user.name github-actions
+          git config --global user.email github-actions@github.com
+
+          git add last_hash.txt
+
+          git diff --cached --quiet && exit 0
+
+          git commit -m "Update page hash"
+
+          git push
