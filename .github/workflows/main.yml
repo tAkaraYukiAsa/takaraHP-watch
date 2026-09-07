@@ -3,7 +3,11 @@ name: Watch Takarazuka Pages
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "3,13,23,33,43,53 * * * *"
+
+concurrency:
+  group: watch-takarazuka-pages
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -23,8 +27,8 @@ jobs:
 
       - name: Install packages
         run: |
-          pip install requests beautifulsoup4 playwright
-          playwright install chromium
+          python -m pip install requests beautifulsoup4 playwright
+          python -m playwright install --with-deps chromium
 
       - name: Get visible text from NTA
         run: |
@@ -94,10 +98,45 @@ jobs:
               browser.close()
           PY
 
+      - name: Get visible text from Travel Vision
+        run: |
+          python - <<'PY'
+          import requests
+          from bs4 import BeautifulSoup
+
+          url = "https://travel-vn.co.jp/news/%E3%80%90%E3%82%A8%E3%83%B3%E3%82%BF%E3%83%A1%E3%80%91%E8%A6%B3%E5%8A%87%E3%83%BB%E8%A6%B3%E6%88%A6%E3%83%84%E3%82%A2%E3%83%BC%E3%81%AA%E3%82%89%E5%BD%93%E7%A4%BE%E3%81%BE%E3%81%A7%EF%BC%81/"
+
+          r = requests.get(
+              url,
+              headers={"User-Agent": "Mozilla/5.0"},
+              timeout=60
+          )
+          r.raise_for_status()
+
+          soup = BeautifulSoup(r.text, "html.parser")
+
+          for tag in soup(["script", "style", "noscript"]):
+              tag.decompose()
+
+          text = "\n".join(
+              line.strip()
+              for line in soup.get_text("\n").splitlines()
+              if line.strip()
+          )
+
+          with open(
+              "travelvn_current.txt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              f.write(text)
+          PY
+
       - name: Create hashes
         run: |
           shasum -a 256 nta_current.txt | awk '{print $1}' > nta_current_hash.txt
           shasum -a 256 yomiuri_current.txt | awk '{print $1}' > yomiuri_current_hash.txt
+          shasum -a 256 travelvn_current.txt | awk '{print $1}' > travelvn_current_hash.txt
 
       - name: Compare NTA page
         id: nta
@@ -106,15 +145,15 @@ jobs:
 
           if [ ! -f last_hash_nta.txt ]; then
             echo "$CURRENT" > last_hash_nta.txt
-            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             PREVIOUS=$(cat last_hash_nta.txt)
 
             if [ "$CURRENT" != "$PREVIOUS" ]; then
               echo "$CURRENT" > last_hash_nta.txt
-              echo "changed=true" >> $GITHUB_OUTPUT
+              echo "changed=true" >> "$GITHUB_OUTPUT"
             else
-              echo "changed=false" >> $GITHUB_OUTPUT
+              echo "changed=false" >> "$GITHUB_OUTPUT"
             fi
           fi
 
@@ -125,15 +164,34 @@ jobs:
 
           if [ ! -f last_hash_yomiuri.txt ]; then
             echo "$CURRENT" > last_hash_yomiuri.txt
-            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             PREVIOUS=$(cat last_hash_yomiuri.txt)
 
             if [ "$CURRENT" != "$PREVIOUS" ]; then
               echo "$CURRENT" > last_hash_yomiuri.txt
-              echo "changed=true" >> $GITHUB_OUTPUT
+              echo "changed=true" >> "$GITHUB_OUTPUT"
             else
-              echo "changed=false" >> $GITHUB_OUTPUT
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Compare Travel Vision page
+        id: travelvn
+        run: |
+          CURRENT=$(cat travelvn_current_hash.txt)
+
+          if [ ! -f last_hash_travelvn.txt ]; then
+            echo "$CURRENT" > last_hash_travelvn.txt
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            PREVIOUS=$(cat last_hash_travelvn.txt)
+
+            if [ "$CURRENT" != "$PREVIOUS" ]; then
+              echo "$CURRENT" > last_hash_travelvn.txt
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "changed=false" >> "$GITHUB_OUTPUT"
             fi
           fi
 
@@ -142,7 +200,7 @@ jobs:
         env:
           TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
-          curl \
+          curl --fail-with-body --silent --show-error \
             -H "Title: 日本旅行 宝塚ページ更新" \
             -H "Priority: high" \
             -H "Click: https://www.nta.co.jp/jrodekakenet/plan/takarazukakageki/" \
@@ -154,11 +212,23 @@ jobs:
         env:
           TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
-          curl \
+          curl --fail-with-body --silent --show-error \
             -H "Title: 読売旅行 宝塚ページ更新" \
             -H "Priority: high" \
             -H "Click: https://www.yomiuri-ryokou.co.jp/r/tour-search/type-kokunai/detail_type-tour/dep_larg-kanto_koshin/dep_mid-tokyo/dst_larg-kanto_koshin/dst_mid-tokyo/freeword-%E5%AE%9D%E5%A1%9A/" \
             -d "読売旅行の宝塚検索ページの表示内容が変わりました。" \
+            "https://ntfy.sh/$TOPIC"
+
+      - name: Notify Travel Vision update
+        if: steps.travelvn.outputs.changed == 'true'
+        env:
+          TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            -H "Title: トラベルビジョン 宝塚ページ更新" \
+            -H "Priority: high" \
+            -H "Click: https://travel-vn.co.jp/news/%E3%80%90%E3%82%A8%E3%83%B3%E3%82%BF%E3%83%A1%E3%80%91%E8%A6%B3%E5%8A%87%E3%83%BB%E8%A6%B3%E6%88%A6%E3%83%84%E3%82%A2%E3%83%BC%E3%81%AA%E3%82%89%E5%BD%93%E7%A4%BE%E3%81%BE%E3%81%A7%EF%BC%81/" \
+            -d "トラベルビジョンの観劇・観戦ツアーページの表示内容が変わりました。" \
             "https://ntfy.sh/$TOPIC"
 
       - name: Save new hashes
@@ -166,7 +236,10 @@ jobs:
           git config --global user.name github-actions
           git config --global user.email github-actions@github.com
 
-          git add last_hash_nta.txt last_hash_yomiuri.txt
+          git add \
+            last_hash_nta.txt \
+            last_hash_yomiuri.txt \
+            last_hash_travelvn.txt
 
           git diff --cached --quiet && exit 0
 
